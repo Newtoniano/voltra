@@ -25,14 +25,16 @@ type Order struct {
 	// Required field to indicate the volume of the symbol.
 	Volume float64
 
-	// Optional field to store the take profit.
-	// This field may be updated when trailing stop loss is used.
+	// Field to store the highest price.
+	// This is required for trailing stop loss calculations.
+	HighestPrice *float64
+
+	// Optional field to store the fixed take profit.
 	// This field is only set when the type is a buy order.
 	TakeProfit *float64
 
 	// Optional field to store the stop loss.
 	// This field may be updated when trailing stop loss is used.
-	// This field is only set when the type is a buy order.
 	StopLoss *float64
 
 	// Optional field for the estimated profit.
@@ -42,6 +44,10 @@ type Order struct {
 	// Optional field for the estimated profit or loss.
 	// This field is only set when the type is a sell order.
 	EstimatedProfitLoss *float64
+
+	// Optional field for the real profit or loss.
+	// This field is only set when the type is a sell order.
+	RealProfitLoss *float64
 
 	// Whether the order is a dummy/fake order, created in test mode.
 	IsTestMode bool

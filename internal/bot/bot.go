@@ -16,8 +16,6 @@ import (
 	"time"
 )
 
-const significantPriceChangeThreshold = 0.8
-
 type Bot struct {
 	market           market.Market
 	db               database.Database
@@ -137,11 +135,9 @@ func (b *Bot) buy(ctx context.Context, wg *sync.WaitGroup) {
 				)
 
 				order := models.Order{
-					Market:     b.market.Name(),
-					Type:       models.BuyOrder,
-					Volume:     volume,
-					TakeProfit: &b.config.TradingOptions.TakeProfit,
-					StopLoss:   &b.config.TradingOptions.StopLoss,
+					Market: b.market.Name(),
+					Type:   models.BuyOrder,
+					Volume: volume,
 				}
 
 				// Pretend to buy the coin and save the order if test mode is enabled.
@@ -163,6 +159,14 @@ func (b *Bot) buy(ctx context.Context, wg *sync.WaitGroup) {
 
 					order.Order = buyOrder
 				}
+
+				// use the real order execution price to calculate the fixed stop loss and take profit
+				fixedStopLoss := order.Price - (order.Price * (math.Abs(b.config.TradingOptions.StopLoss / 100)))
+				order.StopLoss = &fixedStopLoss
+				fixedTakeProfit := order.Price + (order.Price * (math.Abs(b.config.TradingOptions.TakeProfit / 100)))
+				order.TakeProfit = &fixedTakeProfit
+
+				order.HighestPrice = &order.Price
 
 				b.db.SaveOrder(order)
 			}
@@ -188,65 +192,34 @@ func (b *Bot) sell(ctx context.Context, wg *sync.WaitGroup) {
 
 			orders := b.db.GetOrders(models.BuyOrder, b.market.Name())
 			for _, boughtCoin := range orders {
-				takeProfit := boughtCoin.Price + (boughtCoin.Price*(*boughtCoin.TakeProfit))/100
-				stopLoss := boughtCoin.Price + (boughtCoin.Price*(-1*math.Abs(*boughtCoin.StopLoss)))/100
-				currentPrice := coins[boughtCoin.Symbol].Price
 				buyPrice := boughtCoin.Price
+				currentPrice := coins[boughtCoin.Symbol].Price
+				if currentPrice > *boughtCoin.HighestPrice {
+					boughtCoin.HighestPrice = &currentPrice
+				}
 				priceChangePercentage := (currentPrice - buyPrice) / buyPrice * 100
+
 				sellFee := currentPrice * (b.config.TradingOptions.TradingFeeTaker / 100)
 				buyFee := buyPrice * (b.config.TradingOptions.TradingFeeTaker / 100)
 				fees := buyFee + sellFee
 
-				// Check that the price is above the take profit and readjust SL and TP accordingly if trialing stop loss is used.
-				if b.config.TradingOptions.TrailingStopOptions.Enable && currentPrice >= takeProfit {
-					trailingStopOptions := b.config.TradingOptions.TrailingStopOptions
-
-					// Calculate trailing stop loss and take profit.
-					tp := priceChangePercentage + trailingStopOptions.TrailingTakeProfit
-					var sl float64
-					var msg string
-					if priceChangePercentage >= significantPriceChangeThreshold {
-						// If the price has changed much we make the stop loss trail closely match the take profit.
-						// This way we don't lose this increase in price if it falls back.
-						sl = tp - trailingStopOptions.TrailingStopLoss
-						msg = "Large change in price occurred."
-					} else {
-						// If the price has changed little we make the stop loss trail loosely match the take profit.
-						// This way we don't get locked out of the trade prematurely.
-						sl = *boughtCoin.TakeProfit - trailingStopOptions.TrailingStopLoss
-						msg = "Small change in price occurred."
-					}
-					if sl <= 0 {
-						// Revert to the current stop loss if the calculated stop loss ends up being negative.
-						sl = *boughtCoin.StopLoss
-						msg += " (stop loss became negative, reverted)"
-					}
+				if b.config.TradingOptions.TrailingStopOptions.Enable {
+					b.calculateStopLoss(priceChangePercentage, &boughtCoin)
 					b.sellLog.Debugw(
-						msg,
-						"significantPriceChangeThreshold", significantPriceChangeThreshold,
 						"priceChangePercentage", priceChangePercentage,
-						"trailingStopLoss", trailingStopOptions.TrailingStopLoss,
-						"trailingTakeProfit", trailingStopOptions.TrailingTakeProfit,
-						"currentStopLoss", *boughtCoin.StopLoss,
-						"currentTakeProfit", *boughtCoin.TakeProfit,
-						"nextStopLoss", sl,
-						"nextTakeProfit", tp,
+						"trailingStopLossPct", b.config.TradingOptions.TrailingStopOptions.TrailingStopLoss,
+						"trailingStopPositivePct", b.config.TradingOptions.TrailingStopOptions.TrailingStopPositive,
+						"trailingStopPositiveOffset", b.config.TradingOptions.TrailingStopOptions.TrailingStopPositiveOffset,
+						"stopLoss", *boughtCoin.StopLoss,
+						"takeProfit", *boughtCoin.TakeProfit,
 					)
-
-					boughtCoin.StopLoss = &sl
-					boughtCoin.TakeProfit = &tp
-
-					b.sellLog.Infof("Price of %s reached more than the trading profit (TP). Adjusting stop loss (SL) to %g and trading profit (TP) to %g.", boughtCoin.Symbol, sl, tp)
-
 					b.db.SaveOrder(boughtCoin)
-
-					continue
 				}
 
 				// If the price of the coin is below the stop loss or above take profit then sell it.
-				if currentPrice <= stopLoss || currentPrice >= takeProfit {
-					estimatedProfitLoss := (currentPrice - buyPrice) * boughtCoin.Volume * (1 - fees)
-					estimatedProfitLossPercentage := b.config.TradingOptions.Quantity * (priceChangePercentage - fees) / 100
+				if currentPrice <= *boughtCoin.StopLoss || currentPrice >= *boughtCoin.TakeProfit {
+					estimatedProfitLoss := (currentPrice-buyPrice)*boughtCoin.Volume - fees
+					estimatedProfitLossPercentage := estimatedProfitLoss / (buyPrice * boughtCoin.Volume) * 100
 					msg := fmt.Sprintf(
 						"Selling %g %s. Estimated %s: $%.2f %.2f%%",
 						boughtCoin.Volume,
@@ -294,13 +267,14 @@ func (b *Bot) sell(ctx context.Context, wg *sync.WaitGroup) {
 						order.Order = sellOrder
 					}
 
-					// Determine actual profit/loss of the executed order.
+					// Determine actual profit/loss of the filled order.
 					sellPrice := order.Price
 					sellFee = sellPrice * (b.config.TradingOptions.TradingFeeTaker / 100)
 					priceChangePercentage = (sellPrice - buyPrice) / buyPrice * 100
 					fees = buyFee + sellFee
-					profitLoss := (sellPrice - buyPrice) * order.Volume * (1 - fees)
-					profitLossPercentage := b.config.TradingOptions.Quantity * (priceChangePercentage - fees) / 100
+					profitLoss := (sellPrice-buyPrice)*order.Volume - fees
+					profitLossPercentage := profitLoss / (buyPrice * order.Volume) * 100
+					order.RealProfitLoss = &profitLoss
 					msg = fmt.Sprintf(
 						"Sold %g %s. %s: $%.2f %.2f%%",
 						boughtCoin.Volume,
@@ -338,13 +312,34 @@ func (b *Bot) sell(ctx context.Context, wg *sync.WaitGroup) {
 					"symbol", boughtCoin.Symbol,
 					"buyPrice", buyPrice,
 					"currentPrice", currentPrice,
-					"takeProfit", takeProfit,
-					"stopLoss", stopLoss,
+					"takeProfit", *boughtCoin.TakeProfit,
+					"stopLoss", *boughtCoin.StopLoss,
 				)
 			}
 
 			time.Sleep(time.Second * time.Duration(b.config.TradingOptions.SellTimeout))
 		}
+	}
+}
+
+func (b *Bot) calculateStopLoss(priceChangePercentage float64, boughtCoin *models.Order) {
+	previousStopLoss := *boughtCoin.StopLoss
+	var newStopLoss float64
+	if b.config.TradingOptions.TrailingStopOptions.TrailingStopPositive != 0.0 {
+		// if the position is in profit, the trailing stop loss will be activated and will replace the default non-trailing stop loss.
+		if priceChangePercentage > math.Abs(b.config.TradingOptions.TrailingStopOptions.TrailingStopPositiveOffset) {
+			newStopLoss = *boughtCoin.HighestPrice - (*boughtCoin.HighestPrice * (b.config.TradingOptions.TrailingStopOptions.TrailingStopPositive / 100))
+		} else if b.config.TradingOptions.TrailingStopOptions.TrailingOnlyOffsetIsReached {
+			newStopLoss = previousStopLoss
+		} else {
+			newStopLoss = math.Max(boughtCoin.Price-(boughtCoin.Price*(math.Abs(b.config.TradingOptions.TrailingStopOptions.TrailingStopLoss/100))), *boughtCoin.StopLoss)
+		}
+	} else {
+		// default trailing stop loss behavior, use static stop loss as hard stop but move the stop loss upwards if the position goes into profit.
+		newStopLoss = math.Max(*boughtCoin.StopLoss, *boughtCoin.HighestPrice-(*boughtCoin.HighestPrice*(math.Abs(b.config.TradingOptions.TrailingStopOptions.TrailingStopLoss/100))))
+	}
+	if newStopLoss != 0.0 {
+		boughtCoin.StopLoss = &newStopLoss
 	}
 }
 

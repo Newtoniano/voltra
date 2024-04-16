@@ -69,6 +69,7 @@ trading_options:
 
   # Specify in PERCENTAGE how much you are looking to gain on a coin.
   # For example, if you set this to 5, the bot will sell the coin if it rises 5% above the price at which it was bought.
+  # If using trailing stop loss, set this to a high value you are willing to close your position at, or comment out/set this to 0 and the bot will close the positions using the trailing stop loss levels.
   take_profit: .8
 
   # Trading fee for the maker in % per trade.
@@ -95,11 +96,24 @@ trading_options:
     # Recommended to set this to true.
     enable: true
 
-    # When `take_profit` is reached, the `stop_loss` is changed to `trailing_stop_loss` PERCENTAGE below `take_profit` hence 'locking in' the profit.
+    # When the price moves in the positive direction, the stop loss will be adjusted to this percentage below the current price, and this new stop loss level will be kept if the price moves in the negative direction.
+    # This value isn't used if trailing_stop_positive is set.
     trailing_stop_loss: .4
 
-    # When `take_profit` is reached, the `take_profit` is changed to `trailing_take_profit` PERCENTAGE above the current price.
-    trailing_take_profit: .1
+    # A different trailing stop loss percentage to use when the position becomes profitable.
+    # If set, the bot will use the fixed stop_loss until the position is profitable, then it will switch to a trailing stop loss using the trailing_stop_positive to calculate the level.
+    trailing_stop_positive: 0.2
+
+    # The profit value at which the trailing_stop_positive will activate (instead of profit > 0) and the trailing_stop_positive will replace the trailing_stop_loss.
+    # TIP: use trailing_stop_positive_offset to make sure that the new trailing stop loss will be in profit by setting trailing_stop_positive_offset higher than trailing_stop_positive.
+    # Your first new trailing stop loss value will then already have locked in profits.
+    # Must be a positive value.
+    trailing_stop_positive_offset: 0.4
+
+    # If trailing_only_offset_is_reached is set to true, the bot will only use the trailing_stop_positive when the trailing_stop_positive_offset is reached.
+    # Until then, the bot will use the fixed stop_loss.
+    trailing_only_offset_is_reached: true
+
 
   # List of tickers to include.
   # To disable this feature, set it to an empty list as follows:

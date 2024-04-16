@@ -135,9 +135,15 @@ type TrailingStopOptions struct {
 	// Recommended to set this to true.
 	Enable bool `mapstructure:"enable"`
 
-	// When `take_profit` is reached, the `stop_loss` is changed to `trailing_stop_loss` PERCENTAGE below `take_profit` hence 'locking in' the profit.
+	// The trailing stop loss value moves up as the price of the coin increases. If the coin price drops afterward, the stop loss won't move down from its previous level.
 	TrailingStopLoss float64 `mapstructure:"trailing_stop_loss"`
 
-	// When `take_profit` is reached, the `take_profit` is changed to `trailing_take_profit` PERCENTAGE above the current price.
-	TrailingTakeProfit float64 `mapstructure:"trailing_take_profit"`
+	// Once the position is profitable, the trailing stop loss will be activated and will replace the fixed stop loss.
+	TrailingStopPositive float64 `mapstructure:"trailing_stop_positive"`
+
+	// The offset value to add to a profitable position before the positive trailing stop loss is activated and its value replaces the default trailing stop loss.
+	TrailingStopPositiveOffset float64 `mapstructure:"trailing_stop_positive_offset"`
+
+	// If true, the trailing stop loss only comes into effect after the offset value has been reached. Until then, the stop loss will stay at its default non-trailing value.
+	TrailingOnlyOffsetIsReached bool `mapstructure:"trailing_only_offset_is_reached"`
 }
