@@ -8,6 +8,7 @@ import (
 	"github.com/sleeyax/voltra/internal/database/models"
 	"github.com/sleeyax/voltra/internal/market"
 	"github.com/stretchr/testify/assert"
+	"math"
 	"sync"
 	"testing"
 )
@@ -204,21 +205,29 @@ func TestBot_sell(t *testing.T) {
 		},
 	})
 
-	db := newMockDatabase()
-	db.SaveOrder(models.Order{
-		Order: market.Order{
-			Symbol: "XTZUSDT",
-			Price:  1.292,
-		},
-		Market:     m.Name(),
-		Type:       models.BuyOrder,
-		Volume:     11.6,
-		TakeProfit: &c.TradingOptions.TakeProfit,
-		StopLoss:   &c.TradingOptions.StopLoss,
-		IsTestMode: true,
-	})
+	marketOrder := market.Order{
+		Symbol: "XTZUSDT",
+		Price:  1.292,
+	}
 
+	db := newMockDatabase()
 	b := New(c, m, db)
+
+	order := models.Order{
+		Order:        marketOrder,
+		Market:       m.Name(),
+		Type:         models.BuyOrder,
+		Volume:       11.6,
+		HighestPrice: &marketOrder.Price,
+		IsTestMode:   true,
+	}
+
+	fixedStopLoss := order.Price - (order.Price * (math.Abs(b.config.TradingOptions.StopLoss / 100)))
+	fixedTakeProfit := order.Price + (order.Price * (math.Abs(b.config.TradingOptions.TakeProfit / 100)))
+	order.TakeProfit = &fixedTakeProfit
+	order.StopLoss = &fixedStopLoss
+
+	db.SaveOrder(order)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -238,12 +247,12 @@ func TestBot_sell_with_trailing_stop_loss(t *testing.T) {
 			ChangeInPrice:   0.5,
 			PairWith:        "USDT",
 			Quantity:        10,
-			TakeProfit:      10,
+			TakeProfit:      20,
 			StopLoss:        5,
-			TradingFeeTaker: 0.075, TrailingStopOptions: config.TrailingStopOptions{
-				Enable:             true,
-				TrailingStopLoss:   1,
-				TrailingTakeProfit: 1,
+			TradingFeeTaker: 0.075,
+			TrailingStopOptions: config.TrailingStopOptions{
+				Enable:           true,
+				TrailingStopLoss: 1,
 			},
 		},
 	}
@@ -268,19 +277,26 @@ func TestBot_sell_with_trailing_stop_loss(t *testing.T) {
 		},
 	})
 
+	marketOrder := market.Order{
+		Symbol: "BTC",
+		Price:  10_000,
+	}
+	takeProfit := marketOrder.Price + (marketOrder.Price * (math.Abs(c.TradingOptions.TakeProfit / 100)))
+	stopLoss := marketOrder.Price - (marketOrder.Price * (math.Abs(c.TradingOptions.StopLoss / 100)))
+
+	order := models.Order{
+		Order:        marketOrder,
+		Market:       m.Name(),
+		Type:         models.BuyOrder,
+		Volume:       0.000909,
+		HighestPrice: &marketOrder.Price,
+		TakeProfit:   &takeProfit,
+		StopLoss:     &stopLoss,
+		IsTestMode:   true,
+	}
+
 	db := newMockDatabase()
-	db.SaveOrder(models.Order{
-		Order: market.Order{
-			Symbol: "BTC",
-			Price:  10_000,
-		},
-		Market:     m.Name(),
-		Type:       models.BuyOrder,
-		Volume:     0.000909,
-		TakeProfit: &c.TradingOptions.TakeProfit,
-		StopLoss:   &c.TradingOptions.StopLoss,
-		IsTestMode: true,
-	})
+	db.SaveOrder(order)
 
 	b := New(c, m, db)
 
@@ -328,4 +344,200 @@ func TestBot_convertVolume(t *testing.T) {
 	})
 	assert.Equal(t, nil, err)
 	assert.Equal(t, 0.0009091, v)
+}
+
+func TestBot_calculateStopLoss_StandardTrailingStop(t *testing.T) {
+	c := config.Configuration{
+		TradingOptions: config.TradingOptions{
+			TakeProfit: 5,
+			StopLoss:   10,
+			TrailingStopOptions: config.TrailingStopOptions{
+				Enable:                     true,
+				TrailingStopLoss:           10,
+				TrailingStopPositive:       0.0,
+				TrailingStopPositiveOffset: 3, // any value is ignored when TrailingStopPositive is 0
+			},
+		},
+	}
+	b := New(&c, newMockMarket(nil), newMockDatabase())
+
+	buyPrice := 100.0
+	stopLoss := buyPrice - (buyPrice * (math.Abs(c.TradingOptions.StopLoss / 100)))
+
+	boughtCoin := models.Order{
+		Order: market.Order{
+			Price: buyPrice,
+		},
+		HighestPrice: &buyPrice,
+		StopLoss:     &stopLoss,
+	}
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 93
+	b.calculateStopLoss(-7, &boughtCoin)
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 100
+	b.calculateStopLoss(0, &boughtCoin)
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 102
+	*boughtCoin.HighestPrice = 102
+	b.calculateStopLoss(2.0, &boughtCoin)
+	assert.Equal(t, 91.8, *boughtCoin.StopLoss)
+	boughtCoin.Price = 101
+	b.calculateStopLoss(1.0, &boughtCoin)
+	assert.Equal(t, 91.8, *boughtCoin.StopLoss)
+	boughtCoin.Price = 95
+	b.calculateStopLoss(-5, &boughtCoin)
+	assert.Equal(t, 91.8, *boughtCoin.StopLoss)
+
+}
+
+func TestBot_calculateStopLoss_PositiveStopNoOffset(t *testing.T) {
+	c := config.Configuration{
+		TradingOptions: config.TradingOptions{
+			TakeProfit: 5,
+			StopLoss:   10,
+			TrailingStopOptions: config.TrailingStopOptions{
+				Enable:                     true,
+				TrailingStopLoss:           10,
+				TrailingStopPositive:       2.0,
+				TrailingStopPositiveOffset: 0,
+			},
+		},
+	}
+	b := New(&c, newMockMarket(nil), newMockDatabase())
+
+	buyPrice := 100.0
+	stopLoss := buyPrice - (buyPrice * (math.Abs(c.TradingOptions.StopLoss / 100)))
+
+	boughtCoin := models.Order{
+		Order: market.Order{
+			Price: 100,
+		},
+		HighestPrice: &buyPrice,
+		StopLoss:     &stopLoss,
+	}
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 93
+	b.calculateStopLoss(-7, &boughtCoin)
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 100
+	b.calculateStopLoss(0, &boughtCoin)
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 102
+	*boughtCoin.HighestPrice = 102
+	b.calculateStopLoss(2.0, &boughtCoin)
+	assert.Equal(t, 99.96, *boughtCoin.StopLoss)
+	boughtCoin.Price = 101
+	b.calculateStopLoss(1.0, &boughtCoin)
+	assert.Equal(t, 99.96, *boughtCoin.StopLoss)
+	boughtCoin.Price = 99.98
+	b.calculateStopLoss(-0.02, &boughtCoin)
+	assert.Equal(t, 99.96, *boughtCoin.StopLoss)
+}
+
+func TestBot_calculateStopLoss_PositiveStopWithOffset(t *testing.T) {
+	c := config.Configuration{
+		TradingOptions: config.TradingOptions{
+			TakeProfit: 5,
+			StopLoss:   10,
+			TrailingStopOptions: config.TrailingStopOptions{
+				Enable:                      true,
+				TrailingStopLoss:            10,
+				TrailingStopPositive:        2.0,
+				TrailingStopPositiveOffset:  3.0,
+				TrailingOnlyOffsetIsReached: false,
+			},
+		},
+	}
+	b := New(&c, newMockMarket(nil), newMockDatabase())
+
+	buyPrice := 100.0
+	stopLoss := buyPrice - (buyPrice * (math.Abs(c.TradingOptions.StopLoss / 100)))
+
+	boughtCoin := models.Order{
+		Order: market.Order{
+			Price: 100,
+		},
+		HighestPrice: &buyPrice,
+		StopLoss:     &stopLoss,
+	}
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 93
+	b.calculateStopLoss(-7, &boughtCoin)
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 102
+	*boughtCoin.HighestPrice = 102
+	b.calculateStopLoss(2.0, &boughtCoin)
+	assert.Equal(t, 91.8, *boughtCoin.StopLoss)
+	boughtCoin.Price = 95
+	b.calculateStopLoss(-5, &boughtCoin)
+	assert.Equal(t, 91.8, *boughtCoin.StopLoss)
+	boughtCoin.Price = 103.5
+	*boughtCoin.HighestPrice = 103.5
+	b.calculateStopLoss(3.5, &boughtCoin)
+	assert.Equal(t, 101.43, *boughtCoin.StopLoss)
+	boughtCoin.Price = 102
+	b.calculateStopLoss(2, &boughtCoin)
+	assert.Equal(t, 101.43, *boughtCoin.StopLoss)
+	boughtCoin.Price = 105
+	*boughtCoin.HighestPrice = 105
+	b.calculateStopLoss(5, &boughtCoin)
+	assert.Equal(t, 102.9, *boughtCoin.StopLoss)
+	boughtCoin.Price = 103
+	b.calculateStopLoss(3, &boughtCoin)
+	assert.Equal(t, 102.9, *boughtCoin.StopLoss)
+}
+
+func TestBot_calculateStopLoss_PositiveStopWithOffsetTrailingOnlyIfReached(t *testing.T) {
+	c := config.Configuration{
+		TradingOptions: config.TradingOptions{
+			TakeProfit: 5,
+			StopLoss:   10,
+			TrailingStopOptions: config.TrailingStopOptions{
+				Enable:                      true,
+				TrailingStopLoss:            10,
+				TrailingStopPositive:        2.0,
+				TrailingStopPositiveOffset:  3.0,
+				TrailingOnlyOffsetIsReached: true,
+			},
+		},
+	}
+	b := New(&c, newMockMarket(nil), newMockDatabase())
+
+	buyPrice := 100.0
+	stopLoss := buyPrice - (buyPrice * (math.Abs(c.TradingOptions.StopLoss / 100)))
+
+	boughtCoin := models.Order{
+		Order: market.Order{
+			Price: 100,
+		},
+		HighestPrice: &buyPrice,
+		StopLoss:     &stopLoss,
+	}
+
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 93
+	b.calculateStopLoss(-7, &boughtCoin)
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 102
+	*boughtCoin.HighestPrice = 102
+	b.calculateStopLoss(2.0, &boughtCoin)
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 95
+	b.calculateStopLoss(-5, &boughtCoin)
+	assert.Equal(t, 90.0, *boughtCoin.StopLoss)
+	boughtCoin.Price = 103.5
+	*boughtCoin.HighestPrice = 103.5
+	b.calculateStopLoss(3.5, &boughtCoin)
+	assert.Equal(t, 101.43, *boughtCoin.StopLoss)
+	boughtCoin.Price = 102
+	b.calculateStopLoss(2, &boughtCoin)
+	assert.Equal(t, 101.43, *boughtCoin.StopLoss)
+	boughtCoin.Price = 105
+	*boughtCoin.HighestPrice = 105
+	b.calculateStopLoss(5, &boughtCoin)
+	assert.Equal(t, 102.9, *boughtCoin.StopLoss)
+	boughtCoin.Price = 103
+	b.calculateStopLoss(3, &boughtCoin)
+	assert.Equal(t, 102.9, *boughtCoin.StopLoss)
 }

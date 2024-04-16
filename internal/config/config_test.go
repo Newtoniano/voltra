@@ -36,7 +36,9 @@ func TestLoad(t *testing.T) {
 
 	assert.Equal(t, true, config.TradingOptions.TrailingStopOptions.Enable)
 	assert.Equal(t, 0.4, config.TradingOptions.TrailingStopOptions.TrailingStopLoss)
-	assert.Equal(t, 0.1, config.TradingOptions.TrailingStopOptions.TrailingTakeProfit)
+	assert.Equal(t, 0.2, config.TradingOptions.TrailingStopOptions.TrailingStopPositive)
+	assert.Equal(t, 0.4, config.TradingOptions.TrailingStopOptions.TrailingStopPositiveOffset)
+	assert.Equal(t, true, config.TradingOptions.TrailingStopOptions.TrailingOnlyOffsetIsReached)
 
 	assert.Equal(t, true, len(config.TradingOptions.AllowList) > 0)
 	assert.Contains(t, config.TradingOptions.AllowList, "AAVE")
